@@ -63,6 +63,7 @@ export enum FetchEventNames {
     'fetch-before' = 'fetch-before',
     'fetch-after' = 'fetch-after',
     'fetch-abort' = 'fetch-abort',
+    'fetch-abandoned' = 'fetch-abandoned',
     'fetch-error' = 'fetch-error',
     'fetch-response' = 'fetch-response',
     'fetch-header-add' = 'fetch-header-add',
@@ -246,4 +247,25 @@ export const validateOptions = <H, P, S>(
                 formatHeadersMsg
             );
     }
+}
+
+type ErrDetails = {
+    status: number;
+    abandoned: boolean;
+}
+
+export const errDetails: Record<string, ErrDetails> = {
+    // https://http.dev/599 - Network Connect Timeout Error
+    'ECONNREFUSED': {
+        status: 599,
+        abandoned: false,
+    },
+    'ECONNRESET': {
+        status: 599,
+        abandoned: false,
+    },
+    'UND_ERR_SOCKET': {
+        status: 599,
+        abandoned: true,
+    },
 }

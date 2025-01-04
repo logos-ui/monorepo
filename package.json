@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "watch": "nodemon -e 'ts' -x 'pnpm recursive run build'",
+    "watch2": "node ./scripts/watch.mjs",
     "test": "cd tests; pnpm run test",
     "test:only": "cd tests; pnpm run test:only",
     "tdd": "cd tests; pnpm run tdd $@",

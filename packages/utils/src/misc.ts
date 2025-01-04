@@ -392,3 +392,27 @@ export const txt = {
         return args.map((arg) => arg.toString()).join('\n');
     }
 }
+
+/**
+ * Checks if the current environment is NodeJS
+ */
+export const isNode = () => !!(
+    global && global.process
+);
+
+
+export const safely = async <T, E extends Error>(fn: Promise<T> | (() => T)) => {
+
+    try {
+        return {
+            error: null,
+            result: await ((fn instanceof Function) ? fn() : fn),
+        }
+    }
+    catch (err) {
+        return {
+            error: err as E,
+            result: null
+        }
+    }
+}

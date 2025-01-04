@@ -1,4 +1,4 @@
-import { Func, assert, assertOptional, deepClone, isFunction, txt } from '@logos-ui/utils';
+import { Func, assert, assertOptional, deepClone, isNode, safely, txt } from '@logos-ui/utils';
 
 import {
     _InternalHttpMethods,
@@ -8,6 +8,7 @@ import {
 } from './types.ts';
 
 import {
+    errDetails,
     FetchError,
     FetchEvent,
     FetchEventName,
@@ -15,6 +16,7 @@ import {
     fetchTypes,
     validateOptions
 } from './helpers.ts';
+import { warn } from 'console';
 
 
 /**
@@ -389,7 +391,12 @@ export class FetchFactory<
         }
 
         let error!: FetchError | Error;
-        let response: Response;
+        let response!: Response;
+        let abandoned = false;
+        let data: unknown;
+        let status: number;
+        let statusText: string;
+        let ok = false;
 
         opts = modifyOptions
             ? modifyOptions(opts as never, state)
@@ -413,23 +420,25 @@ export class FetchFactory<
             );
         }
 
-        try {
+        this.dispatchEvent(
+            new FetchEvent(
+                FetchEventNames['fetch-before'],
+                {
+                    ...opts,
+                    payload,
+                    url,
+                    state: this.#state
+                }
+            )
+        );
 
-            this.dispatchEvent(
-                new FetchEvent(
-                    FetchEventNames['fetch-before'],
-                    {
-                        ...opts,
-                        payload,
-                        url,
-                        state: this.#state
-                    }
-                )
-            );
+        onBeforeRequest && onBeforeRequest(opts);
 
-            onBeforeRequest && onBeforeRequest(opts);
+        const reqAttempt = await safely(() => (fetch(url, opts) as Promise<Response>))
 
-            response = await fetch(url, opts) as Response;
+        if (reqAttempt.result !== null) {
+
+            response = reqAttempt.result;
 
             clearTimeout(cancelTimeout);
 
@@ -439,145 +448,191 @@ export class FetchFactory<
                     payload,
                     url,
                     state: this.#state,
-                    response: response.clone()
+                    response
                 })
             );
 
-            onAfterRequest && onAfterRequest(response.clone(), opts);
+            onAfterRequest && onAfterRequest(response, opts);
 
-            let data: unknown;
-            let { status, statusText, ok } = response;
-
-            try {
-
-                const { type, isJson } = this.#determineType(response);
-
-                if (isJson) {
-
-                    data = await response.text();
-
-                    if (data) {
-
-                        data = JSON.parse(data as string);
-                    }
-
-                    if (!data) {
-
-                        data = null;
-                    }
-
-                }
-                else {
-
-                    data = await response[type]();
-                }
-            }
-            catch (e) {
-
-                const err = e as Error;
-
-                ok = false;
-                error = new FetchError(err.message);
-                error.stack = err.stack;
-
-                data = null;
-                status = 999;
-                statusText = err.message;
-            }
-
-            if (ok === true) {
-
-                this.dispatchEvent(
-
-                    new FetchEvent(
-
-                        FetchEventNames['fetch-response'],
-                        {
-                            ...opts,
-                            payload,
-                            url,
-                            state: this.#state,
-                            response,
-                            data
-                        }
-                    )
-                );
-
-                return data as Res;
-            }
-
-            if (error === undefined) {
-                error = new FetchError(statusText);
-            }
-
-            const fetchError = error as FetchError;
-
-            fetchError.data = data as null;
-            fetchError.status = status;
-            fetchError.method = method;
-            fetchError.path = path;
-            fetchError.aborted = options.controller.signal.aborted;
-
-            throw fetchError;
+            status = response.status;
+            statusText = response.statusText;
+            ok = response.ok;
         }
-        catch (e) {
 
-            const err = e as FetchError | Error;
+        const parseAttempt = await safely(async () => {
 
-            if (err instanceof FetchError === false) {
+            if (!response) {
 
-                error = new FetchError(err.message);
+                return
+            };
+
+            const { type, isJson } = this.#determineType(response);
+
+            if (isJson) {
+
+                data = await response.text();
+
+                if (data) {
+
+                    data = JSON.parse(data as string);
+                }
+
+                if (!data) {
+
+                    data = null;
+                }
+
             }
             else {
 
-                error = err;
+                data = await response[type]();
             }
+        });
 
-            const fetchError = error as FetchError;
+        if (!reqAttempt.error && parseAttempt.error) {
 
-            let statusCode = fetchError.status || 999;
-            const name = err.name;
-            const message = (
-                options.controller.signal.reason ||
-                err.message ||
-                name
-            ) as string;
+            const err = parseAttempt.error;
 
-            if (options.controller.signal.aborted) {
+            ok = false;
+            error = new FetchError(err.message);
+            error.stack = err.stack;
 
-                statusCode = 499;
-                error.message = message
-            }
-
-            fetchError.status = statusCode;
-            fetchError.data = fetchError.data || { message };
-            fetchError.method = method;
-            fetchError.path = path;
-            fetchError.aborted = options.controller.signal.aborted;
+            data = null;
+            status = 999;
+            statusText = err.message;
         }
+
+        warn(
+            '...',
+            reqAttempt.error,
+            parseAttempt.error
+        )
+
+        if (ok === true) {
+
+            this.dispatchEvent(
+
+                new FetchEvent(
+
+                    FetchEventNames['fetch-response'],
+                    {
+                        ...opts,
+                        payload,
+                        url,
+                        state: this.#state,
+                        response,
+                        data
+                    }
+                )
+            );
+
+            return data as Res;
+        }
+
+        console.log(fetchError)
+
+        const err = reqAttempt.error! || parseAttempt.error!;
+
+        if (err && err instanceof FetchError === false) {
+
+            error = new FetchError(error.message);
+        }
+
+        if (error !== null) {
+
+            error = new FetchError(statusText!);
+        }
+
+        if (reqAttempt.error && parseAttempt.error) {
+
+            // Notifies the user of both errors
+            console.info('There was an error parsing the response content after a failed request');
+            console.error(parseAttempt.error);
+
+            error = new FetchError(reqAttempt.error.message);
+        }
+
+        const fetchError = error as FetchError;
+
+
+        if (
+            isNode() &&
+            err?.cause &&
+            !fetchError.status
+        ) {
+            const cause = err.cause as Error & { code: string };
+            const details = errDetails[cause.code as never]!;
+
+            const _status = details?.status;
+
+            if (_status) {
+
+                fetchError.status = _status;
+            }
+
+            abandoned = details?.abandoned || false;
+        }
+
+        const name = err?.name || statusText! || 'Unknown Error';
+        const message = (
+            options.controller.signal.reason ||
+            err?.message ||
+            name
+        ) as string;
 
         if (options.controller.signal.aborted) {
 
-            this.dispatchEvent(
-                new FetchEvent(FetchEventNames['fetch-abort'], {
-                    ...opts,
-                    payload,
-                    url,
-                    state: this.#state
-                })
-            );
+            // https://http.dev/499 - Client Closed Request
+            status = 499;
+            error.message = message
         }
-        else {
 
-            this.dispatchEvent(
-                new FetchEvent(FetchEventNames['fetch-error'], {
-                    ...opts,
-                    payload,
-                    url,
-                    state: this.#state,
-                    error: error as FetchError
-                })
-            );
+        fetchError.status = status!;
+        fetchError.data = data || { message };
+        fetchError.method = method;
+        fetchError.path = path;
+        fetchError.aborted = options.controller.signal.aborted;
+
+        switch (true) {
+
+            case abandoned:
+
+                this.dispatchEvent(
+                    new FetchEvent(FetchEventNames['fetch-abandoned'], {
+                        ...opts,
+                        payload,
+                        url,
+                        state: this.#state,
+                        error: fetchError
+                    })
+                );
+
+                break;
+
+            case fetchError.aborted:
+
+                this.dispatchEvent(
+                    new FetchEvent(FetchEventNames['fetch-abort'], {
+                        ...opts,
+                        payload,
+                        url,
+                        state: this.#state
+                    })
+                );
+
+                break;
+
+            default:
+
+                this.dispatchEvent(
+                    new FetchEvent(FetchEventNames['fetch-error'], {
+                        ...opts,
+                        payload,
+                        url,
+                        state: this.#state,
+                        error: fetchError
+                    })
+                );
         }
 
         onError && onError(error as FetchError);

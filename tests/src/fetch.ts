@@ -16,7 +16,8 @@ import {
     FetchFactory
 } from '@logos-ui/fetch';
 
-import { sandbox } from './_helpers';
+import { log, sandbox } from './_helpers';
+import { safely } from '@logos-ui/utils';
 
 const mkHapiRoute = (
     path: string,
@@ -25,11 +26,18 @@ const mkHapiRoute = (
 ) => ({ method: '*', path, handler, options })
 const wait = (n: number, r: any = 'ok') => new Promise(res => setTimeout(() => res(r), n));
 
-describe('@logos-ui/fetch', () => {
+describe.only('@logos-ui/fetch', () => {
 
     const callStub = sandbox.stub<[Hapi.Request]>();
     const testUrl = 'http://localhost:3456';
-    const server = Hapi.server({ port: 3456 });
+    const server = Hapi.server({
+        port: 3456,
+        routes: {
+            timeout: {
+                socket: 500
+            }
+        }
+    });
 
     let throwBadContentType = false;
 
@@ -51,7 +59,7 @@ describe('@logos-ui/fetch', () => {
         [
             mkHapiRoute('/json{n?}', (req) => { callStub(req); return { ok: true }; }),
             mkHapiRoute('/fail', () => { return Boom.badRequest('message', { the: 'data' }); }),
-            mkHapiRoute('/wait', () => wait(1000, 'ok')),
+            mkHapiRoute('/wait', () => wait(250, 'ok')),
             mkHapiRoute('/drop', (_, h) => h.close),
             mkHapiRoute('/abandon', (_, h) => h.abandon),
             mkHapiRoute('/empty', () => { return null; }),
@@ -626,7 +634,6 @@ describe('@logos-ui/fetch', () => {
 
     });
 
-
     it('sends payloads', async () => {
 
         const payload = { pay: 'load' };
@@ -719,9 +726,31 @@ describe('@logos-ui/fetch', () => {
         throwBadContentType = false;
     });
 
-    it('can abort requests', async () => {
+    it('handles faulty servers', async () => {
 
         const onError = sandbox.stub();
+
+        const api = new FetchFactory({
+            baseUrl: 'http://localhost:19199',
+            headers: {
+                'content-type': 'application/json'
+            }
+        });
+
+        await safely(api.get('/json', { onError }));
+
+        const [[dropReq]] = onError.args as [[FetchError]];
+        expect(dropReq.status).to.equal(599);
+    });
+
+    it.only('can abort requests', async () => {
+
+        const onError = () => {
+
+            console.log('... onError ');
+
+            return sandbox.stub();
+        }
         const onBeforeReq = (opts: FetchFactory.RequestOpts) => {
 
             setTimeout(() => {
@@ -734,8 +763,7 @@ describe('@logos-ui/fetch', () => {
             baseUrl: testUrl,
         });
 
-        try { await api.get('/wait', { onError, onBeforeReq }); }
-        catch (e) {}
+        await safely(api.get('/wait', { onError, onBeforeReq }));
 
         const [[errArgs]] = onError.args as [[FetchError]];
         expect(errArgs.status).to.equal(499);
@@ -949,7 +977,7 @@ describe('@logos-ui/fetch', () => {
         expect(resetReq.headers).to.contain({ 'was-set': 'not-set' });
     });
 
-    it('listens for events', async () => {
+    it('listens for events', { timeout: 1000 }, async () => {
 
         const listener = sandbox.stub();
 
@@ -972,6 +1000,7 @@ describe('@logos-ui/fetch', () => {
 
             expect(ev.state, `${ev.type} state`).to.exist;
             expect(ev.state, `${ev.type} specific state`).to.contain(state);
+
         }
 
         const assertRemoteEv = (
@@ -1009,6 +1038,35 @@ describe('@logos-ui/fetch', () => {
         for (const ev of [evBefore1, evAfter1, evError1] as FetchEvent[]) {
 
             assertRemoteEv('/fail', 'GET', ev);
+        }
+
+
+        /**
+         * Test Server cancels
+         */
+
+        listener.reset();
+
+        try { await api.get('/abandon'); }
+        catch (e) {}
+
+        log(
+            listener.args[1]?.[0]?.error,
+            listener.args[1]?.[0]?.error,
+        );
+
+        expect(listener.calledThrice).to.be.true
+
+
+        const [[evBeforeDrop], [evAfterDrop], [evErrorDrop]] = listener.args as [[FetchEvent],[FetchEvent],[FetchEvent]];
+
+        expect(evBeforeDrop.type).to.eq('fetch-before');
+        expect(evAfterDrop.type).to.eq('fetch-after');
+        expect(evErrorDrop.type).to.eq('fetch-error');
+
+        for (const ev of [evBeforeDrop, evAfterDrop, evErrorDrop] as FetchEvent[]) {
+
+            assertRemoteEv('/abandon', 'GET', ev);
         }
 
         /**
@@ -1510,22 +1568,17 @@ describe('@logos-ui/fetch', () => {
             baseUrl: testUrl,
         });
 
-        try {
-            await api.get('/validate?name=&age=17')
-            throw new Error('Should have thrown');
-        }
-        catch (e) {
+        const { error } = await safely<{}, FetchError>(api.get('/validate?name=&age=17'))
 
-            expect(e).to.be.an.instanceOf(FetchError);
+        console.log(error)
 
-            const err = e as FetchError;
+        expect(error).to.be.an.instanceOf(FetchError);
 
-            expect(err.data).to.contain({
-                statusCode: 400,
-                error: 'Bad Request',
-                message: `"name" is not allowed to be empty`,
-            });
-        }
+        expect(error!.data).to.contain({
+            statusCode: 400,
+            error: 'Bad Request',
+            message: `"name" is not allowed to be empty`,
+        });
     });
 
 });
