@@ -24,7 +24,7 @@ The [`tests/`](../../tests) workspace runs the full validation suite for all pac
 - [`tests/src/observable/`](../../tests/src/observable) — unit tests for `@logosdx/observer` (engine, queue, relay)
 - [`tests/src/react/`](../../tests/src/react) — unit tests for `@logosdx/react` (10 files)
 - [`tests/src/storage/`](../../tests/src/storage) — unit tests for `@logosdx/storage`
-- [`tests/src/hooks.ts`](../../tests/src/hooks.ts) — unit tests for `@logosdx/hooks` (1462 LOC)
+- [`tests/src/hooks.ts`](../../tests/src/hooks.ts) — unit tests for `@logosdx/hooks` (1923 LOC), including direct coverage for `addPipe()`/`pipe()`/`pipeSync()` (onion middleware, priority ordering, cast-free typed registration)
 - [`tests/src/localize.ts`](../../tests/src/localize.ts) — unit tests for `@logosdx/localize` (835 LOC)
 - [`tests/src/localize-extractor.ts`](../../tests/src/localize-extractor.ts) — unit tests for the localize type extractor (426 LOC)
 - [`tests/src/state-machine.ts`](../../tests/src/state-machine.ts) — unit tests for `@logosdx/state-machine` (1499 LOC)

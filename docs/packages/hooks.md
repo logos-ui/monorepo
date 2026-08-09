@@ -127,6 +127,7 @@ new HookEngine<Lifecycle, FailArgs>(options?)
 |--------|-------------|
 | `register(...names)` | Enable strict mode. Returns `this` for chaining. |
 | `add(name, callback, options?)` | Subscribe. Returns cleanup function. |
+| `addPipe(name, callback, options?)` | Subscribe pipe middleware. Returns cleanup function. |
 | `run(name, ...args)` | Run hook async. Returns `Promise<RunResult>`. |
 | `runSync(name, ...args)` | Run hook sync. Returns `RunResult`. |
 | `pipe(name, coreFn, ...args)` | Pipe hook async (onion middleware). Returns result. |
@@ -195,6 +196,8 @@ const actualResult = await doWork(...args);
 
 ### AddOptions
 
+Same options for `add()` and `addPipe()`:
+
 ```typescript
 hooks.add('name', callback, {
     once: true,           // Remove after first run (sugar for times: 1)
@@ -262,9 +265,9 @@ const wrappedValidate = hooks.wrapSync(
 // Post: receives (result, ...args, ctx) — can transform result
 ```
 
-### pipe() / pipeSync()
+### addPipe()
 
-Onion/middleware composition where each callback wraps the next. Used for cross-cutting concerns like retry, deduplication, and caching execution.
+Subscribe pipe middleware to a lifecycle hook, typed against the lifecycle's `(next, ...args, ctx)` shape — middleware registers with full inference, no `as any` cast required.
 
 ```typescript
 interface PipeLifecycle {
@@ -274,18 +277,24 @@ interface PipeLifecycle {
 const hooks = new HookEngine<PipeLifecycle>()
     .register('execute');
 
-// Add middleware — receives (next, ...args, ctx)
-hooks.add('execute', async (next, opts, ctx) => {
+// addPipe infers (next, opts, ctx) from the lifecycle signature
+hooks.addPipe('execute', async (next, opts, ctx) => {
     console.log('before core');
     const result = await next();   // call next middleware or core function
     console.log('after core');
     return result;
 }, { priority: -10 });
+```
 
-// Run the pipe — core function is the innermost call
+### pipe() / pipeSync()
+
+Run middleware registered via `addPipe()` as an onion/middleware composition — each callback wraps the next. Used for cross-cutting concerns like retry, deduplication, and caching execution.
+
+```typescript
+// Run the pipe — core function is the innermost call, closes over opts
 const result = await hooks.pipe('execute',
-    async (opts) => fetch(opts.url, opts),  // core function
-    opts                                      // spread args
+    () => fetch(opts.url, opts),  // core function
+    opts                          // passed to each middleware call
 );
 ```
 
@@ -304,7 +313,7 @@ const result = await hooks.pipe('execute',
 
 ```typescript
 const result = hooks.pipeSync('validate',
-    (data) => validate(data),
+    () => validate(data),
     data
 );
 ```

@@ -128,7 +128,7 @@ export function dedupePlugin<H = unknown, P = unknown, S = unknown>(
 
         install(engine: FetchEnginePublic<H, P, S>): () => void {
 
-            const cleanup = engine.hooks.add('execute', (async (next: () => Promise<any>, opts: any) => {
+            const cleanup = engine.hooks.addPipe('execute', async (next, opts) => {
 
                 const normalizedOpts = opts as InternalReqOptions<H, P, S>;
                 const { method, path } = normalizedOpts;
@@ -172,7 +172,7 @@ export function dedupePlugin<H = unknown, P = unknown, S = unknown>(
                         throw err;
                     }
 
-                    return new Promise((resolve, reject) => {
+                    return new Promise<any>((resolve, reject) => {
 
                         let settled = false;
 
@@ -242,7 +242,7 @@ export function dedupePlugin<H = unknown, P = unknown, S = unknown>(
 
                     inflightMap.delete(key);
                 }
-            }) as any, { priority: -30 });
+            }, { priority: -30 });
 
             return cleanup;
         }

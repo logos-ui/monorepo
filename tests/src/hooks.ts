@@ -10,7 +10,9 @@ import {
     HookError,
     isHookError,
     HookContext,
-    HookScope
+    HookScope,
+    PipeContext,
+    PipeCallback
 } from '../../packages/hooks/src/index.ts';
 
 import { attempt, attemptSync } from '../../packages/utils/src/index.ts';
@@ -948,6 +950,465 @@ describe('@logosdx/hooks', () => {
                 () => 'result',
                 {} as any
             )).to.throw(/requires at least one of "pre" or "post"/);
+        });
+    });
+
+    describe('engine.addPipe()', () => {
+
+        it('returns unsubscribe function that removes the middleware', async () => {
+
+            const engine = new HookEngine();
+            const middleware = vi.fn((next: any, ..._args: any[]) => next());
+
+            const unsub = engine.addPipe('test', middleware);
+
+            await engine.pipe('test', async () => 'core-result');
+            expect(middleware).toHaveBeenCalledOnce();
+
+            unsub();
+
+            await engine.pipe('test', async () => 'core-result');
+            expect(middleware).toHaveBeenCalledOnce();
+        });
+
+        it('rejects invalid name', () => {
+
+            const engine = new HookEngine();
+
+            expect(() => engine.addPipe(null as any, (next: any, ..._args: any[]) => next())).to.throw();
+            expect(() => engine.addPipe(123 as any, (next: any, ..._args: any[]) => next())).to.throw();
+        });
+
+        it('rejects invalid callback', () => {
+
+            const engine = new HookEngine();
+
+            expect(() => engine.addPipe('test', null as any)).to.throw();
+            expect(() => engine.addPipe('test', 'notAFunction' as any)).to.throw();
+        });
+
+        it('enforces register() strict mode, naming addPipe in the error', () => {
+
+            const engine = new HookEngine();
+            engine.register('validHook');
+
+            expect(() => engine.addPipe('invalidHook', (next: any, ..._args: any[]) => next())).to.throw(
+                /Hook "invalidHook" is not registered/
+            );
+            expect(() => engine.addPipe('invalidHook', (next: any, ..._args: any[]) => next())).to.throw(
+                /using addPipe\(\)/
+            );
+        });
+
+        describe('type-level: PipeCallback registers cast-free (issue #147)', () => {
+
+            interface Lifecycle {
+                execute(opts: { url: string }): Promise<string>;
+            }
+
+            it('accepts a PipeCallback-typed const with no casts', async () => {
+
+                const engine = new HookEngine<Lifecycle>();
+
+                const middleware: PipeCallback<[opts: { url: string }], string> = async (next, opts) => {
+
+                    expect(opts.url).to.equal('/api/users');
+                    return next();
+                };
+
+                engine.addPipe('execute', middleware);
+
+                const result = await engine.pipe('execute', async () => 'core-result', { url: '/api/users' });
+
+                expect(result).to.equal('core-result');
+            });
+
+            it('accepts an inline callback with inferred params', async () => {
+
+                const engine = new HookEngine<Lifecycle>();
+
+                engine.addPipe('execute', async (next, opts) => {
+
+                    expect(opts.url).to.equal('/api/users');
+                    return next();
+                });
+
+                const result = await engine.pipe('execute', async () => 'core-result', { url: '/api/users' });
+
+                expect(result).to.equal('core-result');
+            });
+        });
+    });
+
+    describe('engine.pipe()', () => {
+
+        interface Lifecycle {
+            execute(): Promise<string>;
+            executeWithOpts(opts: { retried: boolean }): Promise<string>;
+            test(a: string, b: number): Promise<string>;
+        }
+
+        it('executes middleware in onion order by priority (lower = outermost)', async () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            const order: string[] = [];
+
+            engine.addPipe('execute', async (next) => {
+
+                order.push('enter:outer');
+                const result = await next();
+                order.push('exit:outer');
+                return result;
+            }, { priority: -20 });
+
+            engine.addPipe('execute', async (next) => {
+
+                order.push('enter:inner');
+                const result = await next();
+                order.push('exit:inner');
+                return result;
+            }, { priority: -10 });
+
+            const result = await engine.pipe('execute', async () => {
+
+                order.push('core');
+                return 'core-result';
+            });
+
+            expect(order).to.deep.equal([
+                'enter:outer', 'enter:inner', 'core', 'exit:inner', 'exit:outer'
+            ]);
+            expect(result).to.equal('core-result');
+        });
+
+        it('passes next fn + spread args + PipeContext as ctx', async () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            let receivedArgs: unknown[] = [];
+
+            engine.addPipe('test', async (next, a, b, ctx) => {
+
+                receivedArgs = [a, b, ctx];
+                return next();
+            });
+
+            await engine.pipe('test', async () => 'core-result', 'hello', 42);
+
+            const ctx = receivedArgs.pop();
+            expect(receivedArgs).to.deep.equal(['hello', 42]);
+            expect(ctx).to.be.instanceOf(PipeContext);
+        });
+
+        it('short-circuits when middleware does not call next()', async () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            const coreFn = vi.fn(async () => 'core-result');
+
+            engine.addPipe('execute', async () => 'cached-result');
+
+            const result = await engine.pipe('execute', coreFn);
+
+            expect(result).to.equal('cached-result');
+            expect(coreFn).not.toHaveBeenCalled();
+        });
+
+        it('propagates the result from next() back through the chain', async () => {
+
+            const engine = new HookEngine<Lifecycle>();
+
+            engine.addPipe('execute', async (next) => {
+
+                const result = await next();
+                return `wrapped:${result}`;
+            });
+
+            const result = await engine.pipe('execute', async () => 'core-result');
+
+            expect(result).to.equal('wrapped:core-result');
+        });
+
+        it('ctx.args() replacement reaches inner layers', async () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            let innerSawOpts: { retried: boolean } | undefined;
+
+            engine.addPipe('executeWithOpts', async (next, opts, ctx) => {
+
+                ctx.args({ ...opts, retried: true });
+                return next();
+            }, { priority: -10 });
+
+            engine.addPipe('executeWithOpts', async (next, opts) => {
+
+                innerSawOpts = opts;
+                return next();
+            }, { priority: 0 });
+
+            await engine.pipe('executeWithOpts', async () => 'core-result', { retried: false });
+
+            expect(innerSawOpts).to.deep.equal({ retried: true });
+        });
+
+        it('ctx.fail() aborts the chain', async () => {
+
+            const engine = new HookEngine<Lifecycle>();
+
+            engine.addPipe('execute', async (_next, ctx) => {
+
+                return ctx.fail('Rate limit exceeded');
+            });
+
+            const [, err] = await attempt(() => engine.pipe('execute', async () => 'core-result'));
+
+            expect(isHookError(err)).to.be.true;
+            expect(err).to.have.property('message').that.includes('Rate limit exceeded');
+        });
+
+        it('ctx.removeHook() removes the middleware from future pipes', async () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            let callCount = 0;
+
+            engine.addPipe('execute', async (next, ctx) => {
+
+                callCount++;
+
+                if (callCount >= 2) ctx.removeHook();
+
+                return next();
+            });
+
+            await engine.pipe('execute', async () => 'a');
+            await engine.pipe('execute', async () => 'b');
+            await engine.pipe('execute', async () => 'c');
+
+            expect(callCount).to.equal(2);
+        });
+
+        it('supports once option', async () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            const middleware = vi.fn<PipeCallback<[], string>>((next) => next());
+
+            engine.addPipe('execute', middleware, { once: true });
+
+            await engine.pipe('execute', async () => 'a');
+            await engine.pipe('execute', async () => 'b');
+
+            expect(middleware).toHaveBeenCalledOnce();
+        });
+
+        it('supports times option', async () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            const middleware = vi.fn<PipeCallback<[], string>>((next) => next());
+
+            engine.addPipe('execute', middleware, { times: 2 });
+
+            await engine.pipe('execute', async () => 'a');
+            await engine.pipe('execute', async () => 'b');
+            await engine.pipe('execute', async () => 'c');
+
+            expect(middleware).toHaveBeenCalledTimes(2);
+        });
+
+        it('supports ignoreOnFail option, falling through to next()', async () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            const coreFn = vi.fn(async () => 'core-result');
+
+            engine.addPipe('execute', async () => { throw new Error('boom'); }, { ignoreOnFail: true });
+
+            const result = await engine.pipe('execute', coreFn);
+
+            expect(result).to.equal('core-result');
+            expect(coreFn).toHaveBeenCalledOnce();
+        });
+    });
+
+    describe('engine.pipeSync()', () => {
+
+        interface Lifecycle {
+            execute(): string;
+            executeWithOpts(opts: { retried: boolean }): string;
+            test(a: string, b: number): string;
+        }
+
+        it('executes middleware in onion order by priority (lower = outermost)', () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            const order: string[] = [];
+
+            engine.addPipe('execute', (next) => {
+
+                order.push('enter:outer');
+                const result = next();
+                order.push('exit:outer');
+                return result;
+            }, { priority: -20 });
+
+            engine.addPipe('execute', (next) => {
+
+                order.push('enter:inner');
+                const result = next();
+                order.push('exit:inner');
+                return result;
+            }, { priority: -10 });
+
+            const result = engine.pipeSync('execute', () => {
+
+                order.push('core');
+                return 'core-result';
+            });
+
+            expect(order).to.deep.equal([
+                'enter:outer', 'enter:inner', 'core', 'exit:inner', 'exit:outer'
+            ]);
+            expect(result).to.equal('core-result');
+        });
+
+        it('passes next fn + spread args + PipeContext as ctx', () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            let receivedArgs: unknown[] = [];
+
+            engine.addPipe('test', (next, a, b, ctx) => {
+
+                receivedArgs = [a, b, ctx];
+                return next();
+            });
+
+            engine.pipeSync('test', () => 'core-result', 'hello', 42);
+
+            const ctx = receivedArgs.pop();
+            expect(receivedArgs).to.deep.equal(['hello', 42]);
+            expect(ctx).to.be.instanceOf(PipeContext);
+        });
+
+        it('short-circuits when middleware does not call next()', () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            const coreFn = vi.fn(() => 'core-result');
+
+            engine.addPipe('execute', () => 'cached-result');
+
+            const result = engine.pipeSync('execute', coreFn);
+
+            expect(result).to.equal('cached-result');
+            expect(coreFn).not.toHaveBeenCalled();
+        });
+
+        it('propagates the result from next() back through the chain', () => {
+
+            const engine = new HookEngine<Lifecycle>();
+
+            engine.addPipe('execute', (next) => {
+
+                const result = next();
+                return `wrapped:${result}`;
+            });
+
+            const result = engine.pipeSync('execute', () => 'core-result');
+
+            expect(result).to.equal('wrapped:core-result');
+        });
+
+        it('ctx.args() replacement reaches inner layers', () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            let innerSawOpts: { retried: boolean } | undefined;
+
+            engine.addPipe('executeWithOpts', (next, opts, ctx) => {
+
+                ctx.args({ ...opts, retried: true });
+                return next();
+            }, { priority: -10 });
+
+            engine.addPipe('executeWithOpts', (next, opts) => {
+
+                innerSawOpts = opts;
+                return next();
+            }, { priority: 0 });
+
+            engine.pipeSync('executeWithOpts', () => 'core-result', { retried: false });
+
+            expect(innerSawOpts).to.deep.equal({ retried: true });
+        });
+
+        it('ctx.fail() aborts the chain', () => {
+
+            const engine = new HookEngine<Lifecycle>();
+
+            engine.addPipe('execute', (_next, ctx) => {
+
+                return ctx.fail('Rate limit exceeded');
+            });
+
+            const [, err] = attemptSync(() => engine.pipeSync('execute', () => 'core-result'));
+
+            expect(isHookError(err)).to.be.true;
+            expect(err).to.have.property('message').that.includes('Rate limit exceeded');
+        });
+
+        it('ctx.removeHook() removes the middleware from future pipes', () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            let callCount = 0;
+
+            engine.addPipe('execute', (next, ctx) => {
+
+                callCount++;
+
+                if (callCount >= 2) ctx.removeHook();
+
+                return next();
+            });
+
+            engine.pipeSync('execute', () => 'a');
+            engine.pipeSync('execute', () => 'b');
+            engine.pipeSync('execute', () => 'c');
+
+            expect(callCount).to.equal(2);
+        });
+
+        it('supports once option', () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            const middleware = vi.fn<PipeCallback<[], string>>((next) => next());
+
+            engine.addPipe('execute', middleware, { once: true });
+
+            engine.pipeSync('execute', () => 'a');
+            engine.pipeSync('execute', () => 'b');
+
+            expect(middleware).toHaveBeenCalledOnce();
+        });
+
+        it('supports times option', () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            const middleware = vi.fn<PipeCallback<[], string>>((next) => next());
+
+            engine.addPipe('execute', middleware, { times: 2 });
+
+            engine.pipeSync('execute', () => 'a');
+            engine.pipeSync('execute', () => 'b');
+            engine.pipeSync('execute', () => 'c');
+
+            expect(middleware).toHaveBeenCalledTimes(2);
+        });
+
+        it('supports ignoreOnFail option, falling through to next()', () => {
+
+            const engine = new HookEngine<Lifecycle>();
+            const coreFn = vi.fn(() => 'core-result');
+
+            engine.addPipe('execute', () => { throw new Error('boom'); }, { ignoreOnFail: true });
+
+            const result = engine.pipeSync('execute', coreFn);
+
+            expect(result).to.equal('core-result');
+            expect(coreFn).toHaveBeenCalledOnce();
         });
     });
 

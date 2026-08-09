@@ -55,7 +55,8 @@ cleanup();
 | Method | Description |
 |--------|-------------|
 | `register(...names)` | Register hooks for runtime validation. Returns `this`. |
-| `add(name, callback, options?)` | Subscribe to hook. Returns cleanup function. |
+| `add(name, callback, options?)` | Subscribe run-shaped callback `(...args, ctx)`. Returns cleanup function. |
+| `addPipe(name, callback, options?)` | Subscribe pipe middleware `(next, ...args, ctx)`. Returns cleanup function. |
 | `run(name, ...args)` | Run hook async. Returns `Promise<RunResult>`. |
 | `runSync(name, ...args)` | Run hook sync. Returns `RunResult`. |
 | `pipe(name, coreFn, ...args)` | Pipe hook async (onion middleware). Returns `Promise<result>`. |
@@ -122,6 +123,22 @@ await hooks.run('beforeRequest', url, opts, {
 ```
 
 
+## addPipe() vs add()
+
+`add()` registers a run-shaped callback `(...args, ctx)`, invoked by `run()`/`runSync()`. `addPipe()` registers pipe middleware `(next, ...args, ctx)`, invoked by `pipe()`/`pipeSync()` — typed against the lifecycle so `next`/args/`ctx` infer correctly, no `as any` cast needed.
+
+Use `add()` for linear before/after hooks. Use `addPipe()` for onion-style middleware wrapping a core call (retry, dedupe, caching execution) that controls flow via `next()`.
+
+```typescript
+hooks.addPipe('execute', async (next, opts, ctx) => {
+    const start = Date.now();
+    const result = await next();
+    console.log(`Took ${Date.now() - start}ms`);
+    return result;
+}, { priority: -10 });
+```
+
+
 ## pipe() — Middleware Composition
 
 Onion/middleware pattern where each callback wraps the next. Used for cross-cutting concerns like retry, dedupe, caching execution.
@@ -129,21 +146,13 @@ Onion/middleware pattern where each callback wraps the next. Used for cross-cutt
 ```typescript
 // Core function is the innermost call
 const result = await hooks.pipe('execute',
-    async (opts) => {
+    async () => {
         const [res, err] = await attempt(() => fetch(opts.url, opts));
         if (err) throw err;
         return res;
     },
     opts
 );
-
-// Callbacks: (next, ...args, ctx) — call next() to proceed
-hooks.add('execute', async (next, opts, ctx) => {
-    const start = Date.now();
-    const result = await next();
-    console.log(`Took ${Date.now() - start}ms`);
-    return result;
-}, { priority: -10 });
 ```
 
 **PipeContext** — simpler than HookContext:
