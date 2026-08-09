@@ -83,7 +83,7 @@ export function retryPlugin<H = unknown, P = unknown, S = unknown>(
 
         install(engine: FetchEnginePublic<H, P, S>): () => void {
 
-            const cleanup = engine.hooks.add('execute', (async (next: () => Promise<any>, opts: any, _ctx: any) => {
+            const cleanup = engine.hooks.addPipe('execute', async (next, opts, _ctx) => {
 
                 const normalizedOpts = opts as InternalReqOptions<H, P, S>;
                 const mergedRetry = resolveConfigForRequest(normalizedOpts);
@@ -129,7 +129,7 @@ export function retryPlugin<H = unknown, P = unknown, S = unknown>(
                         (normalizedOpts as any).signal = attemptController.signal;
                     }
 
-                    const [result, err] = await attempt(async () => next());
+                    const [result, err] = await attempt(async (): Promise<any> => next());
 
                     // Restore original controller/signal
                     if (normalizedOpts.attemptTimeout !== undefined) {
@@ -280,7 +280,7 @@ export function retryPlugin<H = unknown, P = unknown, S = unknown>(
 
                 throw new FetchError('Unexpected end of retry logic');
 
-            }) as any, { priority: -20 });
+            }, { priority: -20 });
 
             return cleanup;
         }

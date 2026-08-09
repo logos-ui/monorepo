@@ -297,7 +297,7 @@ export class HookContext<
  * flow by calling or not calling `next()`.
  *
  * @example
- *     hooks.add('execute', async (next, opts, ctx) => {
+ *     hooks.addPipe('execute', async (next, opts, ctx) => {
  *         // Modify opts for inner layers
  *         ctx.args({ ...opts, headers: { ...opts.headers, Auth: token } });
  *
@@ -574,44 +574,57 @@ export class HookEngine<Lifecycle = DefaultLifecycle, FailArgs extends unknown[]
 
         this.#assertRegistered(name, 'add');
 
-        const priority = options.priority ?? 0;
-        const entry: HookEntry<any, FailArgs> = { callback, options, priority };
+        return this.#insertEntry(name as string, callback, options);
+    }
 
-        const hooks = this.#hooks.get(name as string) ?? [];
+    /**
+     * Subscribe pipe middleware to a lifecycle hook, typed against the lifecycle's
+     * `(next, ...args, ctx)` shape so retry/dedupe-style wrappers register without
+     * `as any` or `@ts-expect-error`.
+     *
+     * Stores into the same registry `add()` uses — `pipe()`/`pipeSync()` already
+     * invoke whatever is stored there, so this is a type-level fix, not a new
+     * runtime path.
+     *
+     * @param name - Name of the lifecycle hook
+     * @param callback - Middleware receiving `(next, ...args, ctx)`
+     * @param options - Options for this subscription
+     * @returns Cleanup function to remove the subscription
+     *
+     * @example
+     *     // Retry middleware: call next(), retry on failure
+     *     hooks.addPipe('execute', async (next, opts, ctx) => {
+     *         for (let i = 0; i < 3; i++) {
+     *             const [result, err] = await attempt(next);
+     *             if (!err) return result;
+     *             await wait(1000 * i);
+     *         }
+     *         throw lastError;
+     *     }, { priority: -20 });
+     *
+     *     // Dedupe middleware: short-circuit by not calling next()
+     *     hooks.addPipe('execute', async (next, opts, ctx) => {
+     *         const inflight = getInflight(key);
+     *         if (inflight) return inflight;
+     *         return next();
+     *     }, { priority: -30 });
+     */
+    addPipe<K extends HookName<Lifecycle>>(
+        name: K,
+        callback: PipeCallback<
+            Parameters<FuncOrNever<Lifecycle[K]>>,
+            Awaited<ReturnType<FuncOrNever<Lifecycle[K]>>>,
+            FailArgs
+        >,
+        options: HookEngine.AddOptions = {}
+    ): () => void {
 
-        let inserted = false;
+        assert(typeof name === 'string', '"name" must be a string');
+        assert(isFunction(callback), '"callback" must be a function');
 
-        for (let i = 0; i < hooks.length; i++) {
+        this.#assertRegistered(name, 'addPipe');
 
-            if (hooks[i]!.priority > priority) {
-
-                hooks.splice(i, 0, entry);
-                inserted = true;
-                break;
-            }
-        }
-
-        if (!inserted) {
-
-            hooks.push(entry);
-        }
-
-        this.#hooks.set(name as string, hooks);
-
-        return () => {
-
-            const arr = this.#hooks.get(name as string);
-
-            if (arr) {
-
-                const idx = arr.indexOf(entry);
-
-                if (idx !== -1) {
-
-                    arr.splice(idx, 1);
-                }
-            }
-        };
+        return this.#insertEntry(name as string, callback, options);
     }
 
     /**
@@ -913,7 +926,7 @@ export class HookEngine<Lifecycle = DefaultLifecycle, FailArgs extends unknown[]
      *
      * @example
      *     // Retry plugin wraps the fetch call
-     *     hooks.add('execute', async (next, opts, ctx) => {
+     *     hooks.addPipe('execute', async (next, opts, ctx) => {
      *         for (let i = 0; i < 3; i++) {
      *             const [result, err] = await attempt(next);
      *             if (!err) return result;
@@ -923,7 +936,7 @@ export class HookEngine<Lifecycle = DefaultLifecycle, FailArgs extends unknown[]
      *     }, { priority: -20 });
      *
      *     // Dedupe plugin wraps retry
-     *     hooks.add('execute', async (next, opts, ctx) => {
+     *     hooks.addPipe('execute', async (next, opts, ctx) => {
      *         const inflight = getInflight(key);
      *         if (inflight) return inflight;
      *         const result = await next();
@@ -1159,6 +1172,57 @@ export class HookEngine<Lifecycle = DefaultLifecycle, FailArgs extends unknown[]
 
         this.#callCounts.set(callback, count + 1);
         return false;
+    }
+
+    /**
+     * Insert a hook entry into its priority-ordered array (lower priority first)
+     * and return the cleanup function that removes it. Shared by `add()` and
+     * `addPipe()` — same storage, different callback shape.
+     */
+    #insertEntry(
+        name: string,
+        callback: (...args: any[]) => any,
+        options: HookEngine.AddOptions
+    ): () => void {
+
+        const priority = options.priority ?? 0;
+        const entry: HookEntry<any, FailArgs> = { callback, options, priority };
+
+        const hooks = this.#hooks.get(name) ?? [];
+
+        let inserted = false;
+
+        for (let i = 0; i < hooks.length; i++) {
+
+            if (hooks[i]!.priority > priority) {
+
+                hooks.splice(i, 0, entry);
+                inserted = true;
+                break;
+            }
+        }
+
+        if (!inserted) {
+
+            hooks.push(entry);
+        }
+
+        this.#hooks.set(name, hooks);
+
+        return () => {
+
+            const arr = this.#hooks.get(name);
+
+            if (arr) {
+
+                const idx = arr.indexOf(entry);
+
+                if (idx !== -1) {
+
+                    arr.splice(idx, 1);
+                }
+            }
+        };
     }
 
     /**
