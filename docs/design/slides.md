@@ -271,23 +271,13 @@ Notes ride on `ObserverEngine` events internally and are packaged as a `HookEngi
 
 Each carries a recommendation; all three are still the maintainer's call.
 
-### 1. Embedded decks — should `<slides>` work at less than full viewport?
+### 1. Embedded decks — RESOLVED: no. One file, one deck.
 
-A scroll container needs a *definite* height, which is why the deck is `100dvh`. Anything short of that has to get its height from somewhere. Three situations want it: a deck embedded in a docs page or blog post, a deck in a sized preview pane, and print.
+**Decided: a document contains exactly one `<slides>`, and it owns the viewport.** Embedded and multi-deck pages are out of scope.
 
-The layout half of this is nearly free:
+This is a constraint that pays for itself. The deck is a singleton, so there is no arbitration over which deck receives arrow keys, no question of which deck owns the URL hash, and no focus model to design. `Deck` becomes a module-level singleton, and the keyboard and history layers get to keep the assumption they already wanted to make. A second `<slides>` in a document is a console error, and extras are ignored rather than half-supported.
 
-```css
-slides { height: var(--deck-height, 100dvh); }
-```
-
-Embedding then costs one attribute — `<slides style="--deck-height: 480px">` — with no mode flag, no JS branch, and no API surface.
-
-The expensive half is everything *global* the deck currently assumes it owns. Two decks on one page means arbitrating which one receives arrow keys, and which one writes the URL hash. Both are singleton assumptions baked into the input and history layers.
-
-**Recommendation: take the cheap half, defer the expensive half.** Ship the custom property so embedded decks lay out correctly in v1, and scope keyboard and URL sync to a single *primary* deck — the first `<slides>` in the document, or one marked `[primary]`. Secondary decks get click-to-focus keyboard and no URL sync. This buys the common embedding case for one line of CSS while leaving the singleton assumptions intact and honest.
-
-Worth knowing regardless: `dvh` is correct here and `vh` is not — `vh` on mobile Safari measures the viewport *without* the collapsible URL bar, so a `100vh` deck is taller than the visible screen and every slide sits slightly cropped.
+Height is therefore just `100dvh`. Note that `dvh` is correct here and `vh` is not: `vh` on mobile Safari measures the viewport *without* the collapsible URL bar, so a `100vh` deck is taller than the visible screen and every slide sits permanently cropped.
 
 ### 2. Implicit panel wrapping — normalize, or warn?
 
