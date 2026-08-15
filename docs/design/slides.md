@@ -177,6 +177,64 @@ JS never positions anything — the browser's scroll engine does. JS coordinates
 Auto-init on DOM ready when a `<slides>` element exists; `Deck` class exported for manual control. Every entry point returns a cleanup, per house convention.
 
 
+## Keyboard control
+
+
+The keyboard map has one non-obvious requirement that follows directly from Decision 2: **if `↓` always jumped to the next panel, a long slide's content would be unreachable by keyboard.** The scroll feature would exist for mouse and touch users only. So vertical keys scroll first and advance only at the boundary — the keyboard analogue of proximity snapping.
+
+| Key | Action |
+|---|---|
+| `→` / `←` | Next / previous **column**. Always, regardless of scroll position. |
+| `↓` / `↑` | Scroll within the panel if there is room; **advance to next/previous panel only at the edge**. |
+| `Space` / `Shift`+`Space` | Universal advance/retreat: fragments → panel → column. The one key a presenter needs. |
+| `PageDown` / `PageUp` | Panel-level jump, ignores fragments and scroll position. |
+| `Home` / `End` | First / last slide. |
+| `S` | Open the speaker-notes window. |
+| `F` | Fullscreen. |
+| `.` / `B` | Blank the screen (presenter classic — hides content without leaving the deck). |
+| `?` | Key help overlay. |
+
+Two guards matter. Input is ignored when the event target is an `input`, `textarea`, `select`, or `contenteditable` — decks contain live demos, and hijacking arrows there would break them. And `S` / `F` must be driven by a real keypress rather than called programmatically: `window.open()` and `requestFullscreen()` both require transient user activation, so neither can be auto-invoked on load.
+
+Bindings attach via `dom`'s `on()` with an `AbortSignal`, so teardown is a single `abort()`.
+
+
+## Speaker notes
+
+
+Notes are authored as a `<notes>` element inside any slide, hidden by an unconditional `notes { display: none }` in the stylesheet. Because the hiding is pure CSS with no JS involvement, **notes can never flash onto the projected screen** — not during load, not if the script fails.
+
+```html
+<slide horizontal>
+    <h2>Q3 revenue</h2>
+    <notes>Pause here. The 40% figure is the one they'll push back on.</notes>
+</slide>
+```
+
+Pressing `S` opens a popup via `window.open('', 'lx-notes', 'popup,width=…')`. The opener writes the notes view into that blank document — **no second HTML file is hosted**, which preserves the zero-install promise. The window shows current notes, a next-slide preview cloned with `importNode`, elapsed and wall-clock time.
+
+The point of a separate *window* rather than a panel is screen-sharing: the presenter shares only the deck window, and the notes window stays on their own display. That requirement rules out an overlay or a split view.
+
+### Transport: the `file://` problem
+
+The obvious transport is `BroadcastChannel`. It is the wrong primary choice here, because of how these decks will actually be opened.
+
+An agent-generated presentation is a single HTML file that the user double-clicks — so it runs on `file://`, where the origin is opaque. `BroadcastChannel`, `localStorage`, and origin-checked `postMessage` are all unreliable or unavailable under an opaque origin. A notes feature built on `BroadcastChannel` alone would work in every demo served over HTTP and fail in the most common real usage.
+
+The transport is therefore layered:
+
+| Layer | Mechanism | Works on | Covers |
+|---|---|---|---|
+| Primary | retained `window` reference + `postMessage(msg, '*')` | `file://` and `http(s)://` | the popup opened with `S` |
+| Enhancement | `BroadcastChannel` when the origin is not opaque | `http(s)://` only | a manually opened second tab or second device |
+
+Both carry the same message contract, so the notes view has one code path. Messages are `{ type, deckId, … }`: the view announces `notes:ready`, the deck replies with a full `deck:state` snapshot, then sends `slide:enter` deltas carrying the notes `innerHTML`, the next slide's HTML, and the current column/panel/fragment indices. Full-snapshot-on-announce means either window can reload and resync without a handshake protocol. A `deck:bye` on `pagehide` lets the view show a disconnected state rather than silently going stale.
+
+`postMessage` uses `'*'` as target origin deliberately — an opaque origin cannot be matched otherwise. This is safe here because the popup is a document we created and wrote ourselves, and the payload is the author's own markup, already trusted as page content.
+
+Notes ride on `ObserverEngine` events internally and are packaged as a `HookEngine` plugin, so the same transport serves a future presenter timer or remote-control view without touching core.
+
+
 ## Distribution
 
 
@@ -211,7 +269,54 @@ Auto-init on DOM ready when a `<slides>` element exists; `Deck` class exported f
 
 ## Open questions
 
+Each carries a recommendation; all three are still the maintainer's call.
 
-1. **Deck height.** `100dvh` assumes the deck owns the viewport. Should an embedded/inline deck (`<slides>` inside a page, sized by its container) be supported in v1, or is full-viewport the only mode?
-2. **Implicit panel wrapping.** Documented above as normalized, but it is the one place the library rewrites author markup. Acceptable, or should mixed content be a console warning instead?
-3. **Fragments in v1** or deferred with notes/export? They pull keyboard handling into a state machine, which is the main complexity in the input layer.
+### 1. Embedded decks — should `<slides>` work at less than full viewport?
+
+A scroll container needs a *definite* height, which is why the deck is `100dvh`. Anything short of that has to get its height from somewhere. Three situations want it: a deck embedded in a docs page or blog post, a deck in a sized preview pane, and print.
+
+The layout half of this is nearly free:
+
+```css
+slides { height: var(--deck-height, 100dvh); }
+```
+
+Embedding then costs one attribute — `<slides style="--deck-height: 480px">` — with no mode flag, no JS branch, and no API surface.
+
+The expensive half is everything *global* the deck currently assumes it owns. Two decks on one page means arbitrating which one receives arrow keys, and which one writes the URL hash. Both are singleton assumptions baked into the input and history layers.
+
+**Recommendation: take the cheap half, defer the expensive half.** Ship the custom property so embedded decks lay out correctly in v1, and scope keyboard and URL sync to a single *primary* deck — the first `<slides>` in the document, or one marked `[primary]`. Secondary decks get click-to-focus keyboard and no URL sync. This buys the common embedding case for one line of CSS while leaving the singleton assumptions intact and honest.
+
+Worth knowing regardless: `dvh` is correct here and `vh` is not — `vh` on mobile Safari measures the viewport *without* the collapsible URL bar, so a `100vh` deck is taller than the visible screen and every slide sits slightly cropped.
+
+### 2. Implicit panel wrapping — normalize, or warn?
+
+The case is a column holding both loose content and `<slide vertical>` children. The doc currently auto-wraps the loose content into an implicit leading panel. Three readings of that markup are defensible:
+
+| Option | Behavior | Cost |
+|---|---|---|
+| **(a) Auto-wrap** | Loose content becomes an implicit leading panel | One DOM mutation of author markup |
+| (b) Warn only | Renders, but breaks snapping — loose content is not a snap target | Punishes the most likely markup with a subtly broken deck |
+| (c) Column chrome | Loose content becomes a persistent sticky header across the column's panels | A real feature, and a real design commitment |
+
+(c) deserves attention because it is not a strawman — a chapter title that stays put while you scroll its sub-points is a genuine presentation idiom, and it is what someone writing that markup might well have meant. It is also the reason (a) carries any risk at all: auto-wrapping quietly picks one interpretation over another plausible one.
+
+**Recommendation: (a), and say so loudly in the docs.** (b) is the worst option — it punishes exactly the markup that agents and humans most naturally write, and the failure is subtle rather than loud. (c) is a feature, not a default; it can arrive later behind an explicit attribute without invalidating (a), since wrapping only ever applies to content the author did *not* place in a panel. The escape hatch is already universal: explicit `<slide vertical>` always wins, so anyone who dislikes the inference simply writes the wrapper.
+
+### 3. Fragments in v1?
+
+Fragments are step-reveal — bullets appearing one at a time. The cost is concentrated in one place: **"advance" stops being a jump and becomes a state machine.** Space must ask whether the active panel has unrevealed fragments, reveal the next if so, and only otherwise move to the next panel. Retreating must re-hide them. Entering a slide backwards should show all of its fragments already revealed. The current fragment index has to join the URL and the notes-window payload.
+
+Against including them: that is the single largest source of complexity in the input layer, and it touches the two other systems just added above.
+
+For including them: this is the most-used presentation feature after "next slide." Without it, presenters split one idea across five near-identical slides — which inflates the deck, and is precisely the crutch this library exists to remove.
+
+**Recommendation: include, with a deliberately minimal contract.** `[fragment]` hidden by default, `[fragment][revealed]` shown, the advance/retreat state machine, and the fragment index in the URL. Explicitly excluded: ordering via `data-fragment-index`, and reveal *styles* (fade-out, highlight, grow). That set is where reveal.js's fragment complexity actually accumulates, and none of it is load-bearing.
+
+One detail this forces, and it is easy to get wrong: fragments must not be hidden by unconditional CSS, or a JS failure would permanently hide real content — violating the progressive-enhancement goal. Scope the rule to a flag JS sets on init:
+
+```css
+slides[data-ready] [fragment]:not([revealed]) { visibility: hidden; }
+```
+
+No JS means no `data-ready`, which means every fragment is visible. The deck degrades to a complete document rather than a lobotomized one.
