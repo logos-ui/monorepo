@@ -37,7 +37,7 @@ Goals:
 
 Non-goals:
 
-- No Prezi-style zoom/camera choreography in v1 (see *Deferred*).
+- No Prezi-style zoom/camera choreography in v1 (see *v1 scope*).
 - No Markdown parsing. Content is HTML; converting Markdown is the caller's job.
 - No theming framework. One neutral default stylesheet plus documented CSS custom properties.
 - No authoring GUI, no server, no runtime dependency beyond the `@logosdx` packages.
@@ -81,6 +81,73 @@ y (column)  proximity    long slides must be free to rest mid-scroll
 ```
 
 Keyboard navigation is unaffected: "next slide" is an explicit `scrollIntoView()`, which snaps precisely regardless of the passive snap mode. `scroll-snap-stop: always` on both axes stops a fast swipe from flying past slides.
+
+
+## Decision 3: one document, one deck
+
+
+**A document contains exactly one `<slides>`, and it owns the viewport.** Embedded, inline, and multi-deck pages are out of scope.
+
+This is a constraint that pays for itself. The deck is a singleton, so there is no arbitration over which deck receives arrow keys, no question of which deck owns the URL hash, and no focus model to design. `Deck` becomes a module-level singleton, and the keyboard and history layers keep the assumption they already wanted to make. A second `<slides>` is a console error; extras are ignored rather than half-supported.
+
+Height is therefore just `100dvh`. `dvh` is correct here and `vh` is not: `vh` on mobile Safari measures the viewport *without* the collapsible URL bar, so a `100vh` deck is taller than the visible screen and every slide sits permanently cropped.
+
+
+## Decision 4: loose column content is wrapped, not warned about
+
+
+A column may hold both loose content and `<slide vertical>` children:
+
+```html
+<slide horizontal>
+    <h2>Chapter 2</h2>          <!-- loose: not inside any panel -->
+    <slide vertical>Point A</slide>
+    <slide vertical>Point B</slide>
+</slide>
+```
+
+The `<h2>` is not a snap target, so untouched it renders above Point A and becomes unreachable once you advance — visible only at the very top of the scroll. Three readings of that markup are defensible:
+
+| Option | Result | Cost |
+|---|---|---|
+| **(a) Auto-wrap** | 3 slides: title, Point A, Point B | One DOM mutation of author markup |
+| (b) Warn only | A stranded half-slide, plus a console message | Punishes the most likely markup with a subtly broken deck |
+| (c) Column chrome | 2 slides, with "Chapter 2" pinned across both | A real feature, and a real design commitment |
+
+**Chosen: (a).** Loose content preceding the first panel is wrapped into an implicit leading `<slide vertical data-implicit>` during upgrade. (b) is the worst option — it punishes exactly the markup that agents and humans most naturally write, and fails subtly rather than loudly. (c) is a genuine idiom and the only reason (a) carries risk at all, but it is a feature to request explicitly, not one to receive by accident; it can arrive later behind its own attribute without invalidating (a), since wrapping only ever touches content the author did *not* place in a panel.
+
+The escape hatch is universal: an explicit `<slide vertical>` always wins, so anyone who dislikes the inference writes the wrapper.
+
+
+## Decision 5: fragments ship in v1, minimally
+
+
+Fragments are step-reveal — content appearing one piece at a time.
+
+```html
+<slide horizontal>
+    <h2>Why the launch slipped</h2>
+    <ul>
+        <li fragment>QA found the auth bug late</li>
+        <li fragment>The vendor API changed under us</li>
+        <li fragment>Nobody told support</li>
+    </ul>
+</slide>
+```
+
+Without this, the same effect requires four near-identical slides each carrying one more bullet — the deck-inflating crutch this library exists to remove. It is the most-used presentation feature after "next slide," so it is in.
+
+The cost is concentrated in one place: **advance stops being a jump and becomes a state machine.**
+
+- `Space` asks whether the active panel has unrevealed fragments; reveal the next and stay if so, otherwise move to the next panel.
+- Retreating re-hides the last revealed fragment before leaving the panel.
+- Entering a panel *backwards* shows all its fragments already revealed — the presenter has passed them.
+- Arriving via deep link shows all fragments revealed, since none were stepped through.
+- Fragment index joins the URL and the speaker-notes payload.
+
+**Explicitly excluded from v1:** custom ordering via `data-fragment-index`, and reveal *styles* (fade-out, highlight, grow). That is where reveal.js's fragment complexity actually accumulates, and none of it is load-bearing.
+
+The trap, restated because it is easy to get wrong: fragments must not be hidden by unconditional CSS. If they were, a script that fails to load — offline, blocked CDN, typo in the tag — would permanently hide authored content with nothing left to reveal it, silently dropping material from the presentation. Gating on the JS-set `data-ready` flag means no JS yields every fragment visible, and the deck degrades to a complete document rather than a lobotomized one.
 
 
 ## Structure and semantics
@@ -149,11 +216,19 @@ slide[vertical] {
     scroll-snap-stop: always;
 }
 
+notes { display: none; }        /* unconditional — never reaches the shared screen */
+
+slides[data-ready] [fragment]:not([revealed]) {
+    visibility: hidden;         /* gated on data-ready — see Decision 3 */
+}
+
 @media print { /* linearize: no snap, no fixed heights, page-break per slide */ }
 @media (prefers-reduced-motion: reduce) { slides { scroll-behavior: auto } }
 ```
 
 `min-height: 100%` on the panel plus `overflow-y: auto` on the column *is* the fix for the Obsidian problem. Everything else is framing.
+
+`visibility: hidden` rather than `display: none` for unrevealed fragments is deliberate: it keeps the element in layout, so revealing a bullet does not reflow the ones already on screen. A list that jumps every time you advance looks broken.
 
 Public theming surface is CSS custom properties on `slides` (`--slide-padding`, `--slide-bg`, `--slide-fg`, `--deck-font`, …). Authors override with ordinary CSS; there is no theme API to learn.
 
@@ -258,55 +333,60 @@ Notes ride on `ObserverEngine` events internally and are packaged as a `HookEngi
 - **Content is ordinary HTML/CSS**, the format agents are strongest at, rather than a bespoke slide DSL.
 
 
-## Deferred
+## Element and attribute reference
 
 
-- Prezi-style zoom/camera layer over the scroll substrate (the reason the transform-based engine was rejected rather than the hybrid — the substrate stays compatible with adding it later).
-- Speaker-notes view over `BroadcastChannel`; PDF export; presenter timer. All intended as `HookEngine` plugins, not core.
-- Transitions beyond scroll: the scroll-snap substrate constrains these, and it is a deliberate v1 trade.
+The complete authoring vocabulary:
+
+| Element | Placement | Meaning |
+|---|---|---|
+| `<slides>` | one per document | The deck. Owns the viewport. |
+| `<slide horizontal>` | child of `<slides>` | A column. Axis inferred if omitted. |
+| `<slide vertical>` | child of a column | A panel. Grows and scrolls. Axis inferred if omitted. |
+| `<notes>` | inside any slide | Speaker notes. Never rendered in the deck. |
+
+| Attribute | On | Set by | Meaning |
+|---|---|---|---|
+| `horizontal` / `vertical` | `slide` | author or upgrade | Axis. Inferred from nesting depth when absent. |
+| `fragment` | any element in a slide | author | Step-revealed on advance. |
+| `revealed` | `[fragment]` | JS | Fragment is currently shown. |
+| `active` | `slide` | JS | Slide is the current one. |
+| `data-ready` | `slides` | JS | Deck initialized. Gates fragment hiding. |
+| `data-implicit` | `slide` | upgrade | Panel was synthesized from loose content. |
+
+
+## v1 scope
+
+
+In: two-axis scroll-snap navigation, overflow-scrolling slides, keyboard control, speaker notes in a popup window, fragments, URL sync, print/PDF linearization, the `HookEngine` plugin surface, CDN + npm distribution.
+
+Deferred:
+
+- Prezi-style zoom/camera layer over the scroll substrate — the reason the transform engine was rejected outright rather than the hybrid: the substrate stays compatible with adding this later.
+- Presenter timer and remote-control view. Both ride the notes transport already built, as `HookEngine` plugins rather than core.
+- Persistent column chrome (Decision 4, option c), behind an explicit attribute.
+- Transitions beyond scroll. The scroll-snap substrate constrains these, and that is a deliberate v1 trade.
 - Markdown-to-slides adapter.
+- Fragment ordering (`data-fragment-index`) and reveal styles.
 
 
 ## Open questions
 
-Each carries a recommendation; all three are still the maintainer's call.
+None outstanding. Decisions 3, 4 and 5 close the three that were open; remaining scope calls are recorded above.
 
-### 1. Embedded decks — RESOLVED: no. One file, one deck.
 
-**Decided: a document contains exactly one `<slides>`, and it owns the viewport.** Embedded and multi-deck pages are out of scope.
+## Implementation notes
 
-This is a constraint that pays for itself. The deck is a singleton, so there is no arbitration over which deck receives arrow keys, no question of which deck owns the URL hash, and no focus model to design. `Deck` becomes a module-level singleton, and the keyboard and history layers get to keep the assumption they already wanted to make. A second `<slides>` in a document is a console error, and extras are ignored rather than half-supported.
 
-Height is therefore just `100dvh`. Note that `dvh` is correct here and `vh` is not: `vh` on mobile Safari measures the viewport *without* the collapsible URL bar, so a `100vh` deck is taller than the visible screen and every slide sits permanently cropped.
+Build order that keeps each step verifiable:
 
-### 2. Implicit panel wrapping — normalize, or warn?
+1. **`src/slides.css` alone.** Hand-write a deck HTML file and confirm two-axis snapping, long-slide scrolling, and the print layout with no JS loaded at all. If this step is not right, nothing after it can be.
+2. **Build-script CSS copy** into `PATHS.BROWSER` (see *Distribution*) — the only change outside the new package.
+3. **Upgrade + normalize** via `observe()`: axis inference, ids, indices, implicit-panel wrapping, `data-ready`.
+4. **Active tracking** via `watchVisibility()`, then the `ObserverEngine` event surface.
+5. **Navigation + keyboard**, including the scroll-before-advance boundary check.
+6. **Fragments**, which extend the advance/retreat state machine from step 5.
+7. **URL sync**, once column/panel/fragment indices all exist.
+8. **Speaker notes** as the first `HookEngine` plugin — proving the plugin surface is real by building a real feature on it.
 
-The case is a column holding both loose content and `<slide vertical>` children. The doc currently auto-wraps the loose content into an implicit leading panel. Three readings of that markup are defensible:
-
-| Option | Behavior | Cost |
-|---|---|---|
-| **(a) Auto-wrap** | Loose content becomes an implicit leading panel | One DOM mutation of author markup |
-| (b) Warn only | Renders, but breaks snapping — loose content is not a snap target | Punishes the most likely markup with a subtly broken deck |
-| (c) Column chrome | Loose content becomes a persistent sticky header across the column's panels | A real feature, and a real design commitment |
-
-(c) deserves attention because it is not a strawman — a chapter title that stays put while you scroll its sub-points is a genuine presentation idiom, and it is what someone writing that markup might well have meant. It is also the reason (a) carries any risk at all: auto-wrapping quietly picks one interpretation over another plausible one.
-
-**Recommendation: (a), and say so loudly in the docs.** (b) is the worst option — it punishes exactly the markup that agents and humans most naturally write, and the failure is subtle rather than loud. (c) is a feature, not a default; it can arrive later behind an explicit attribute without invalidating (a), since wrapping only ever applies to content the author did *not* place in a panel. The escape hatch is already universal: explicit `<slide vertical>` always wins, so anyone who dislikes the inference simply writes the wrapper.
-
-### 3. Fragments in v1?
-
-Fragments are step-reveal — bullets appearing one at a time. The cost is concentrated in one place: **"advance" stops being a jump and becomes a state machine.** Space must ask whether the active panel has unrevealed fragments, reveal the next if so, and only otherwise move to the next panel. Retreating must re-hide them. Entering a slide backwards should show all of its fragments already revealed. The current fragment index has to join the URL and the notes-window payload.
-
-Against including them: that is the single largest source of complexity in the input layer, and it touches the two other systems just added above.
-
-For including them: this is the most-used presentation feature after "next slide." Without it, presenters split one idea across five near-identical slides — which inflates the deck, and is precisely the crutch this library exists to remove.
-
-**Recommendation: include, with a deliberately minimal contract.** `[fragment]` hidden by default, `[fragment][revealed]` shown, the advance/retreat state machine, and the fragment index in the URL. Explicitly excluded: ordering via `data-fragment-index`, and reveal *styles* (fade-out, highlight, grow). That set is where reveal.js's fragment complexity actually accumulates, and none of it is load-bearing.
-
-One detail this forces, and it is easy to get wrong: fragments must not be hidden by unconditional CSS, or a JS failure would permanently hide real content — violating the progressive-enhancement goal. Scope the rule to a flag JS sets on init:
-
-```css
-slides[data-ready] [fragment]:not([revealed]) { visibility: hidden; }
-```
-
-No JS means no `data-ready`, which means every fragment is visible. The deck degrades to a complete document rather than a lobotomized one.
+Testing: the suite is Vitest with a jsdom project and a Playwright/Chromium project. Scroll snapping, `IntersectionObserver` and `window.open` are meaningless under jsdom, so navigation, active tracking and notes belong in `tests/src/smoke/` against real Chromium. Upgrade/normalization logic and the fragment state machine are pure DOM transforms and unit-test fine in jsdom. Per house rules, tests import from `../../../../packages/slides/src/index.ts`.
